@@ -35,7 +35,7 @@ def write_pickle(obj, filename):
         pickle.dump(obj, f)
 
 
-fn = "ibm_hr/{}.pkl"
+preprocessed_data_path = "preprocessed/{}.pkl"
 MODELS = {
     "logistic_regression": ("Logistic Regression", LogisticRegression()),
     "decision_tree": ("Decision Tree", DecisionTreeClassifier()),
@@ -49,73 +49,66 @@ SAMPLINGS = {
 }
 
 pca = PCA()
-X_std = read_pickle(fn.format("X_std"))
-X_norm = read_pickle(fn.format("X_norm"))
-y_raw = read_pickle(fn.format("y_raw"))
-DATA = {"std": (X_std, y_raw), "norm": (X_norm, y_raw)}
-n_features = X_std.shape[1]
-SAMPLING_METHODS = ("normal", "under", "over", "combined")
+X_z_score = read_pickle(preprocessed_data_path.format("X_z_score"))
+X_min_max_norm = read_pickle(preprocessed_data_path.format("X_min_max_norm"))
+y_raw = read_pickle(preprocessed_data_path.format("Y_raw"))
+DATA = {
+    "z_score_norm": (X_z_score, y_raw),
+    "min_max_norm": (X_min_max_norm, y_raw),
+}
+n_features = X_z_score.shape[1]
+SAMPLING_METHODS = ("normal", "under", "over")
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="IBM HR")
-    parser.add_argument("mode", type=str, default="train", help="Working mode")
-    return parser.parse_args()
+def evaluate(data, normalization_method, sampling_method, result_path="result/{}.pkl"):
+    X, Y = data
+    base_steps = [("pca", pca)]
+    base_param_grid = {
+        "pca__n_components": list(range(1, n_features + 1)),
+    }
+    if sampling_method == "combined":
+        base_steps.append(("over", RandomOverSampler()))
+        base_steps.append(("under", RandomUnderSampler()))
+    else:
+        sampling = SAMPLINGS.get(sampling_method)
+        if sampling:
+            base_steps.append(("sampling", sampling))
+    print(f"\n\nSampling method: {sampling_method}\n")
+    eval_result = dict()
 
+    for k, v in MODELS.items():
+        # Define steps
+        steps = base_steps.copy()
+        steps.append((k, v[1]))
 
-def evaluate(data_type="std", sampling_method="normal"):
-    data = DATA.get(data_type)
-    if data:
-        X, y = data
-        base_steps = [("pca", pca)]
-        base_param_grid = {
-            "pca__n_components": list(range(1, n_features + 1)),
-        }
-        if sampling_method == "combined":
-            base_steps.append(("over", RandomOverSampler()))
-            base_steps.append(("under", RandomUnderSampler()))
-        else:
-            sampling = SAMPLINGS.get(sampling_method)
-            if sampling:
-                base_steps.append(("sampling", sampling))
-        print(f"\n\nSampling method: {sampling_method}\n")
-        eval_result = dict()
+        # Define pipeline
+        pipe = Pipeline(steps=steps)
 
-        for k, v in MODELS.items():
-            # Define steps
-            steps = base_steps.copy()
-            steps.append((k, v[1]))
+        # Define grid parameters
+        param_grid = base_param_grid.copy()
+        if len(v) == 3:
+            param_grid = {**param_grid, **v[2]}
 
-            # Define pipeline
-            pipe = Pipeline(steps=steps)
+        # GridSearch
+        search = GridSearchCV(pipe, param_grid, n_jobs=-1)
+        search.fit(X, Y)
 
-            # Define grid parameters
-            param_grid = base_param_grid.copy()
-            if len(v) == 3:
-                param_grid = {**param_grid, **v[2]}
+        # Result
+        print(f"{v[0]}: {search.best_score_}")
+        eval_result[k] = search.best_score_
 
-            # GridSearch
-            search = GridSearchCV(pipe, param_grid, n_jobs=-1)
-            search.fit(X, y)
+        # Save data
+        write_pickle(
+            search.best_estimator_,
+            result_path.format(f"{normalization_method}_{sampling_method}_{k}"),
+        )
 
-            # Result
-            print(f"{v[0]}: {search.best_score_}")
-            eval_result[k] = search.best_score_
-
-            # Save data
-            write_pickle(
-                search.best_estimator_, fn.format(f"{data_type}_{sampling_method}_{k}")
-            )
-        write_pickle(eval_result, fn.format(f"rs_{data_type}_{sampling_method}"))
+    write_pickle(
+        eval_result, result_path.format(f"rs_{normalization_method}_{sampling_method}")
+    )
 
 
 if __name__ == "__main__":
-    args = parse_arguments()
-    if args.mode == "train":
-        evaluate()
-    elif args.mode == "eval":
-        for d in DATA.keys():
-            for s in SAMPLING_METHODS:
-                evaluate(d, s)
-    else:
-        print("Invalid mode!")
+    for normalization_method, data in DATA.items():
+        for method in SAMPLING_METHODS:
+            evaluate(data, normalization_method, method)
